@@ -75,33 +75,34 @@ def bs_greeks(S, K, r, q, sigma, tau, option_type="call"):
     n_d1 = norm.pdf(d1)  # standard normal density
 
     if option_type == "call":
-        delta = np.exp(-q * tau) * norm.cdf(d1)
-        theta = (- S * np.exp(-q * tau) * n_d1 * sigma / (2 * sqrt_tau)
+        delta = np.exp(-q * tau) * norm.cdf(d1) # ∂Price/∂S
+        theta = (- S * np.exp(-q * tau) * n_d1 * sigma / (2 * sqrt_tau) # ∂Price/∂t
                  + q * S * np.exp(-q * tau) * norm.cdf(d1)
                  - r * K * np.exp(-r * tau) * norm.cdf(d2))
-        rho = K * tau * np.exp(-r * tau) * norm.cdf(d2)
+        rho = K * tau * np.exp(-r * tau) * norm.cdf(d2) # ∂Price/∂r
     else:  # put
-        delta = np.exp(-q * tau) * (norm.cdf(d1) - 1)
-        theta = (- S * np.exp(-q * tau) * n_d1 * sigma / (2 * sqrt_tau)
+        delta = np.exp(-q * tau) * (norm.cdf(d1) - 1) # ∂Price/∂S
+        theta = (- S * np.exp(-q * tau) * n_d1 * sigma / (2 * sqrt_tau) # ∂Price/∂t
                  - q * S * np.exp(-q * tau) * norm.cdf(-d1)
                  + r * K * np.exp(-r * tau) * norm.cdf(-d2))
-        rho = -K * tau * np.exp(-r * tau) * norm.cdf(-d2)
+        rho = -K * tau * np.exp(-r * tau) * norm.cdf(-d2) # ∂Price/∂r
 
-    gamma = np.exp(-q * tau) * n_d1 / (S * sigma * sqrt_tau)
-    vega = S * np.exp(-q * tau) * n_d1 * sqrt_tau
+    gamma = np.exp(-q * tau) * n_d1 / (S * sigma * sqrt_tau) # ∂^2Price/∂S^2
+    vega = S * np.exp(-q * tau) * n_d1 * sqrt_tau # ∂Price/∂σ
 
     return {"delta": delta, "gamma": gamma, "theta": theta,
             "vega": vega, "rho": rho}
 
 
 # ── PyTorch version (for validation inside training loop) ────────────────────
+# Same formula as bs_call, but: Uses PyTorch tensors and is fully differentiable
 
 def bs_call_torch(S, K, r, q, sigma, tau):
     """
     Vectorised BS call price in pure PyTorch (differentiable).
 
     All inputs are torch tensors (or broadcastable scalars).
-    Uses the error-function approximation of the normal CDF:
+    Uses the error-function approximation of the normal CDF (PyTorch does not have a built-in normal CDF):
         Phi(x) = 0.5 * (1 + erf(x / sqrt(2)))
     """
     import torch

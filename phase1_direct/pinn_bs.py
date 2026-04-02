@@ -26,7 +26,7 @@ class PINN_BS(nn.Module):
     """
     Feed-forward PINN for Black-Scholes with constant σ.
 
-    Parameters
+    Parameters (architecture)
     ----------
     layers       : list[int]  – layer sizes including input & output
                                 default: [2, 64, 64, 64, 64, 1]
@@ -51,7 +51,8 @@ class PINN_BS(nn.Module):
         else:
             raise ValueError(f"Unknown activation: {activation}")
 
-        # Xavier initialization (important for tanh networks)
+        # Xavier initialization (important for tanh networks): We use it to avoid
+        # vanishing/exploding gradients.
         self._init_weights()
 
     def _init_weights(self):
@@ -77,11 +78,11 @@ class PINN_BS(nn.Module):
         if t_norm.dim() == 1:
             t_norm = t_norm.unsqueeze(-1)
 
-        x = torch.cat([S_norm, t_norm], dim=-1)  # (N, 2)
+        x = torch.cat([S_norm, t_norm], dim=-1)  # (N, 2) Inputs are S_norm and t_norm
 
-        for lin in self.linears[:-1]:
+        for lin in self.linears[:-1]: # Hidden layers
             x = self.act(lin(x))
-        x = self.linears[-1](x)  # no activation on output
+        x = self.linears[-1](x)  # Output layer (no activation)
         return x
 
 
@@ -94,7 +95,7 @@ def compute_pde_residual(model: PINN_BS, S: torch.Tensor, t: torch.Tensor,
         ∂V/∂t + (r-q)·S·∂V/∂S + ½·σ²·S²·∂²V/∂S² − r·V = 0
 
     We feed normalized inputs to the network but compute derivatives
-    w.r.t. the *physical* variables via autograd (which handles the
+    w.r.t. the *physical* variables (not normalized) via autograd (which handles the
     chain rule automatically because S_norm = f(S)).
 
     Parameters
@@ -116,7 +117,7 @@ def compute_pde_residual(model: PINN_BS, S: torch.Tensor, t: torch.Tensor,
 
     # First derivatives via autograd
     V_t = torch.autograd.grad(V, t, grad_outputs=torch.ones_like(V),
-                              create_graph=True)[0]
+                              create_graph=True)[0] # create_graph=True allows us to compute higher-order derivatives, that we need for the PDE.
     V_S = torch.autograd.grad(V, S, grad_outputs=torch.ones_like(V),
                               create_graph=True)[0]
 
@@ -129,10 +130,11 @@ def compute_pde_residual(model: PINN_BS, S: torch.Tensor, t: torch.Tensor,
 
     return residual
 
-
+# Boundary and initial conditions: They are necessary to solve the PDE.
+# Otherwise, there would be infinite solutions.
 def terminal_condition(S: torch.Tensor, K: float):
     """
-    European call payoff at expiry: max(S - K, 0).
+    European call payoff at expiry (t=T): max(S - K, 0).
     """
     return torch.clamp(S - K, min=0.0)
 
@@ -147,6 +149,7 @@ def boundary_condition_lower(t: torch.Tensor, K: float, r: float, q: float, T: f
 def boundary_condition_upper(S_max: float, t: torch.Tensor,
                              K: float, r: float, q: float, T: float):
     """
+    Deep in-the-money approximation:
     V(S_max, t) ≈ S_max·e^{-q(T-t)} − K·e^{-r(T-t)}  for a deep ITM call.
     """
     tau = T - t  # time to maturity

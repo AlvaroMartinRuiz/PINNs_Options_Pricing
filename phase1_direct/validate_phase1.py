@@ -48,44 +48,47 @@ def evaluate_on_grid(model, normalizer, params, n_S=200, n_t=100, device='cpu'):
     K, r, q, sigma, T = params['K'], params['r'], params['q'], params['sigma'], params['T']
     S_min, S_max = params['S_min'], params['S_max']
 
-    # Avoid S=0 exactly (log issues in BS formula, though our implementation handles it)
-    S_1d = np.linspace(S_min + 0.5, S_max, n_S)
+    # 1) Create a grid. Avoid S=0 exactly (log issues in BS formula, though our implementation handles it)
+    S_1d = np.linspace(S_min + 0.5, S_max, n_S) # Add 0.5 to S_min to avoid S=0 exactly (log issues in BS formula, though our implementation handles it)
     t_1d = np.linspace(0.0, T - 1e-6, n_t)  # avoid exact t=T (tau=0)
 
     S_grid, t_grid = np.meshgrid(S_1d, t_1d, indexing='ij')  # (n_S, n_t)
 
-    # BS analytical
+    # 2) BS analytical solution (true option price)
     tau_grid = T - t_grid
-    V_bs = bs_call(S_grid, K, r, q, sigma, tau_grid)
+    V_bs = bs_call(S_grid, K, r, q, sigma, tau_grid) # Function that computes the Black-Scholes formula (closed-formed solution)
 
-    # PINN predictions
+    # 3) PINN predictions (flatten → pass through network → reshape back)
     S_flat = torch.tensor(S_grid.flatten(), dtype=torch.float32, device=device).unsqueeze(-1)
     t_flat = torch.tensor(t_grid.flatten(), dtype=torch.float32, device=device).unsqueeze(-1)
 
     model.eval()
     with torch.no_grad():
-        S_norm, t_norm = normalizer.normalize(S_flat, t_flat)
+        S_norm, t_norm = normalizer.normalize(S_flat, t_flat) # Normalize input data because the network was trained with normalized data
         V_pinn_flat = model(S_norm, t_norm).cpu().numpy().flatten()
 
     V_pinn = V_pinn_flat.reshape(n_S, n_t)
 
+    # 4) Return two surfaces: PINN vs exact
     return S_1d, t_1d, S_grid, t_grid, V_pinn, V_bs
 
 
 def compute_metrics(V_pinn, V_bs, S_grid, K):
-    """Compute error metrics."""
-    abs_error = np.abs(V_pinn - V_bs)
+    """Compute error metrics (how wrong the PINN is)."""
+    abs_error = np.abs(V_pinn - V_bs) # Absolute error between PINN and BS
     # Avoid division by zero for deep OTM (V_bs ≈ 0)
-    itm_mask = S_grid > K * 0.8  # roughly ITM + near-ATM
+    itm_mask = S_grid > K * 0.8  # roughly ITM + near-ATM (heuristic)
 
     metrics = {
-        'max_abs_error': np.max(abs_error),
-        'rmse': np.sqrt(np.mean(abs_error**2)),
-        'mae': np.mean(abs_error),
-        'max_error_itm': np.max(abs_error[itm_mask]) if itm_mask.any() else 0.0,
+        'max_abs_error': np.max(abs_error), # Maximum absolute error (worst case point)
+        'rmse': np.sqrt(np.mean(abs_error**2)), # Root Mean Square Error 
+        'mae': np.mean(abs_error), # Mean Absolute Error 
+        'max_error_itm': np.max(abs_error[itm_mask]) if itm_mask.any() else 0.0, # Maximum error in ITM options
         'mean_rel_error_itm': np.mean(
             abs_error[itm_mask] / np.maximum(np.abs(V_bs[itm_mask]), 1e-8)
-        ) if itm_mask.any() else 0.0,
+        ) if itm_mask.any() else 0.0, # Mean relative error in ITM options
+        # Because deep OTM options have very small prices (V_bs -> 0), relative error is not a good metric, 
+        # so we focus on meaningful region (ITM + near-ATM)
     }
     return metrics, abs_error
 
@@ -95,7 +98,7 @@ def validate(model_path: str, results_dir: str = 'results/phase1',
     """
     Full validation pipeline.
     """
-    # Load checkpoint
+    # 1) Load checkpoint (trained weights and BS parameters)
     checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
     params = checkpoint['params']
 
@@ -103,6 +106,7 @@ def validate(model_path: str, results_dir: str = 'results/phase1',
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
+    # 2) Initialize normalizer: Ensures inputs match training scale
     normalizer = Phase1Normalizer(S_min=params['S_min'], S_max=params['S_max'],
                                   t_min=0.0, t_max=params['T'])
 
@@ -115,10 +119,11 @@ def validate(model_path: str, results_dir: str = 'results/phase1',
     print(f"  Validation grid: {n_S} x {n_t} = {n_S * n_t} points")
     print()
 
-    # Evaluate
+    # 3) Evaluate model on a grid
     S_1d, t_1d, S_grid, t_grid, V_pinn, V_bs = evaluate_on_grid(
         model, normalizer, params, n_S, n_t
     )
+    # 4) Compute metrics
     metrics, abs_error = compute_metrics(V_pinn, V_bs, S_grid, params['K'])
 
     # Print results
@@ -130,7 +135,7 @@ def validate(model_path: str, results_dir: str = 'results/phase1',
     print(f"    Mean rel error (ITM) : {metrics['mean_rel_error_itm']:.4%}")
     print()
 
-    # Pass / Fail
+    # 5) Pass / Fail
     pass_max = metrics['max_abs_error'] < 0.05
     pass_rmse = metrics['rmse'] < 0.005
     status = "PASS" if (pass_max and pass_rmse) else "FAIL"
@@ -165,7 +170,7 @@ def validate(model_path: str, results_dir: str = 'results/phase1',
         show=show
     )
 
-    # 3. 1D slice comparisons
+    # 3. 1D slice comparisons (fixed times, vary S)
     T = params['T']
     slice_times = [0.0, T * 0.25, T * 0.5, T * 0.75]
     slice_indices = [np.argmin(np.abs(t_1d - tv)) for tv in slice_times]

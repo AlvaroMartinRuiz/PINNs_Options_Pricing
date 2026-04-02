@@ -7,7 +7,7 @@ Strategy:
 
 Collocation points:
     - Interior (PDE): 10,000 random points in [0, S_max] x [0, T]
-    - Terminal (IC):  500 random points at t = T
+    - Terminal (IC):  500 random points at t = T (initial condition in backward time, because the PDE is solved backwards in time: start at t=T and go to t=0)
     - Boundary (BC):  200 random points (100 at S=0, 100 at S=S_max)
 
 Loss:
@@ -25,7 +25,7 @@ import numpy as np
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # Add project root to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..')) # This is done to import the modules from the parent directory.
 
 from phase1_direct.pinn_bs import (
     PINN_BS, compute_pde_residual,
@@ -64,7 +64,8 @@ TRAIN = {
 
 
 # ── Collocation Point Sampling ───────────────────────────────────────────────
-
+# These points are used to evaluate the PDE and the boundary conditions.
+# The points are used as inputs to the neural network.
 def sample_interior(n, S_min, S_max, T, device):
     """Random points in the interior: S in (S_min, S_max), t in (0, T)."""
     S = S_min + (S_max - S_min) * torch.rand(n, 1, device=device)

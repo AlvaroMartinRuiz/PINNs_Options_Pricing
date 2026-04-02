@@ -1,7 +1,7 @@
 """
 Input normalization utilities for PINN training.
 
-Phase 1:  Min-max scaling  (S, t) -> [0, 1]^2
+Phase 1:  Min-max scaling (maps [low, high] -> [0, 1])  (S, t) -> [0, 1]^2 
 Phase 2+: Log-moneyness    (S, K) -> m = ln(S/K), tau = T - t
 """
 
@@ -43,8 +43,8 @@ class Phase1Normalizer:
 
     def __init__(self, S_min: float = 0.0, S_max: float = 100.0,
                  t_min: float = 0.0, t_max: float = 0.5):
-        self.S_scaler = MinMaxScaler(S_min, S_max)
-        self.t_scaler = MinMaxScaler(t_min, t_max)
+        self.S_scaler = MinMaxScaler(S_min, S_max) # Two independent scalers: one for price S 
+        self.t_scaler = MinMaxScaler(t_min, t_max) # one for time t
 
     def normalize(self, S: torch.Tensor, t: torch.Tensor):
         """Return (S_norm, t_norm) in [0,1]^2."""

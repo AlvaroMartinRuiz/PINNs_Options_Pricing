@@ -69,3 +69,38 @@ class Phase1Normalizer:
     @property
     def t_max(self):
         return self.t_scaler.hi
+
+
+class LogMoneynessNormalizer:
+    """
+    Phase 2+ normalizer: works in log-moneyness coordinates.
+
+    Transforms:
+        m    = ln(S/K)   -- log-moneyness (centered at 0 = ATM)
+        tau  = T - t     -- time to maturity
+
+    Normalization:
+        m_norm   = m / m_scale      (simple scaling, keeps m=0 at center)
+        tau_norm = tau / tau_max     (scales to [0, 1])
+
+    Parameters
+    ----------
+    m_scale : float  -- characteristic moneyness scale (e.g. 0.5)
+    tau_max : float  -- maximum maturity in the domain
+    """
+
+    def __init__(self, m_scale: float = 0.5, tau_max: float = 1.0):
+        self.m_scale = m_scale
+        self.tau_max = tau_max
+
+    def to_log_moneyness(self, S: torch.Tensor, K) -> torch.Tensor:
+        """Compute m = ln(S/K)."""
+        return torch.log(S / K)
+
+    def normalize(self, m: torch.Tensor, tau: torch.Tensor):
+        """Normalize (m, tau) for network input."""
+        return m / self.m_scale, tau / self.tau_max
+
+    def denormalize(self, m_norm: torch.Tensor, tau_norm: torch.Tensor):
+        """Recover physical (m, tau) from normalized values."""
+        return m_norm * self.m_scale, tau_norm * self.tau_max

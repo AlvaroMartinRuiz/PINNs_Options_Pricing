@@ -1,21 +1,18 @@
 """
 Dual-output Physics-Informed Neural Network for Phase 2 (Inverse Problem).
 
-Architecture:
-    Input:  (m_norm, tau_norm)  -- normalized log-moneyness and time-to-maturity
-    Shared trunk: 3 hidden layers x 64 neurons, tanh
-    Price head:   1 hidden layer x 64 neurons -> 1 output (v_hat, normalized price V/K)
-    Vol head:     1 hidden layer x 32 neurons -> 1 output (sigma_hat, local volatility)
-                  Uses softplus to guarantee sigma > 0
+Architecture (v2 -- separate networks):
+    Price network: (m_norm, tau_norm) -> v_hat   [4 x 64 tanh, 1 linear]
+    Vol network:   (m_norm, tau_norm) -> sigma_hat [3 x 64 tanh, softplus]
+
+    The two networks are coupled ONLY through the PDE loss, not through
+    shared parameters. This prevents the ill-conditioned vol gradients
+    from contaminating the price network's learning.
 
 PDE (in log-moneyness coordinates):
     dv/dtau = (1/2)*sigma^2 * d2v/dm2
               + (r - q - sigma^2/2) * dv/dm
               - r * v
-
-The PINN simultaneously learns:
-    1. The normalized price surface v(m, tau)
-    2. The local volatility surface sigma(m, tau)
 """
 
 import torch
@@ -25,63 +22,50 @@ import math
 
 class PINN_Dual(nn.Module):
     """
-    Dual-output PINN for local volatility calibration.
+    Dual-output PINN with SEPARATE networks for price and volatility.
 
     Parameters (architecture)
     ----------
-    trunk_layers : list[int] -- shared trunk hidden sizes (default: [64, 64, 64])
-    price_layers : list[int] -- price head hidden sizes (default: [64])
-    vol_layers   : list[int] -- vol head hidden sizes (default: [32])
+    price_layers : list[int] -- price network hidden sizes (default: [64, 64, 64, 64])
+    vol_layers   : list[int] -- vol network hidden sizes (default: [64, 64, 64])
     sigma_min    : float     -- minimum volatility floor (default: 0.01)
     """
 
-    def __init__(self, trunk_layers=None, price_layers=None, vol_layers=None,
-                 sigma_min=0.01):
+    def __init__(self, price_layers=None, vol_layers=None, sigma_min=0.01):
         super().__init__()
 
-        if trunk_layers is None:
-            trunk_layers = [64, 64, 64]
         if price_layers is None:
-            price_layers = [64]
+            price_layers = [64, 64, 64, 64]
         if vol_layers is None:
-            vol_layers = [32]
+            vol_layers = [64, 64, 64]
 
         self.sigma_min = sigma_min
 
-        # --- Shared trunk ---
-        trunk = []
+        # --- Price network (independent) ---
+        price_mods = []
         in_dim = 2  # (m_norm, tau_norm)
-        for h in trunk_layers:
-            trunk.append(nn.Linear(in_dim, h))
-            in_dim = h
-        self.trunk = nn.ModuleList(trunk)
-        trunk_out_dim = trunk_layers[-1]
-
-        # --- Price head ---
-        price = []
-        in_dim = trunk_out_dim
         for h in price_layers:
-            price.append(nn.Linear(in_dim, h))
+            price_mods.append(nn.Linear(in_dim, h))
             in_dim = h
-        price.append(nn.Linear(in_dim, 1))
-        self.price_head = nn.ModuleList(price)
+        price_mods.append(nn.Linear(in_dim, 1))  # output layer
+        self.price_net = nn.ModuleList(price_mods)
 
-        # --- Vol head ---
-        vol = []
-        in_dim = trunk_out_dim
+        # --- Vol network (independent) ---
+        vol_mods = []
+        in_dim = 2  # (m_norm, tau_norm)
         for h in vol_layers:
-            vol.append(nn.Linear(in_dim, h))
+            vol_mods.append(nn.Linear(in_dim, h))
             in_dim = h
-        vol.append(nn.Linear(in_dim, 1))
-        self.vol_head = nn.ModuleList(vol)
+        vol_mods.append(nn.Linear(in_dim, 1))  # output layer
+        self.vol_net = nn.ModuleList(vol_mods)
 
         self.act = torch.tanh
 
-        # Xavier initialization: We use it to avoid vanishing/exploding gradients.
+        # Xavier initialization: avoid vanishing/exploding gradients.
         self._init_weights()
 
     def _init_weights(self):
-        for module_list in [self.trunk, self.price_head, self.vol_head]:
+        for module_list in [self.price_net, self.vol_net]:
             for layer in module_list:
                 if isinstance(layer, nn.Linear):
                     nn.init.xavier_normal_(layer.weight)
@@ -89,7 +73,7 @@ class PINN_Dual(nn.Module):
 
     def forward(self, m_norm, tau_norm):
         """
-        Forward pass.
+        Forward pass through both independent networks.
 
         Parameters
         ----------
@@ -105,22 +89,19 @@ class PINN_Dual(nn.Module):
         if tau_norm.dim() == 1:
             tau_norm = tau_norm.unsqueeze(-1)
 
-        # Shared trunk
-        x = torch.cat([m_norm, tau_norm], dim=-1)  # (N, 2)
-        for layer in self.trunk:
-            x = self.act(layer(x))
+        inp = torch.cat([m_norm, tau_norm], dim=-1)  # (N, 2)
 
-        # Price head
-        v = x
-        for layer in self.price_head[:-1]:
+        # Price network
+        v = inp
+        for layer in self.price_net[:-1]:
             v = self.act(layer(v))
-        v_hat = self.price_head[-1](v)  # linear output
+        v_hat = self.price_net[-1](v)  # linear output (price can be any value)
 
-        # Vol head
-        s = x
-        for layer in self.vol_head[:-1]:
+        # Vol network
+        s = inp
+        for layer in self.vol_net[:-1]:
             s = self.act(layer(s))
-        sigma_raw = self.vol_head[-1](s)
+        sigma_raw = self.vol_net[-1](s)
         # softplus ensures sigma > 0, then add floor
         sigma_hat = nn.functional.softplus(sigma_raw) + self.sigma_min
 
@@ -179,16 +160,6 @@ def compute_smoothness_loss(model, m, tau, normalizer):
     Tikhonov regularization on the volatility surface: ||grad(sigma)||^2.
 
     This prevents wild oscillations in the recovered volatility.
-
-    Parameters
-    ----------
-    model      : PINN_Dual instance
-    m, tau     : physical-coordinate tensors with requires_grad=True
-    normalizer : LogMoneynessNormalizer
-
-    Returns
-    -------
-    smooth_loss : scalar tensor -- mean of (dsigma/dm)^2 + (dsigma/dtau)^2
     """
     m_norm, tau_norm = normalizer.normalize(m, tau)
     _, sigma_hat = model(m_norm, tau_norm)
@@ -201,56 +172,6 @@ def compute_smoothness_loss(model, m, tau, normalizer):
                                     create_graph=True)[0]
 
     return torch.mean(sigma_m**2 + sigma_tau**2)
-
-
-def compute_dupire_consistency_loss(model, m, tau, normalizer, r, q):
-    """
-    Dupire consistency loss: sigma_hat must equal the vol implied by the
-    PINN's own price derivatives.
-
-    From the PDE, solving for sigma^2:
-        sigma^2 = 2 * (dv/dtau + r*v) / (d2v/dm2 - dv/dm)
-               (ignoring the drift term for the Dupire-like inversion)
-
-    More precisely, from:
-        dv/dtau = 0.5*sig^2*(d2v/dm2 - dv/dm) + (r-q)*dv/dm - r*v
-    we get:
-        sig^2 = 2*(dv/dtau - (r-q)*dv/dm + r*v) / (d2v/dm2 - dv/dm)
-
-    This loss penalizes: ||sigma_hat^2 - sigma_dupire^2||^2
-
-    Only applied where d2v/dm2 - dv/dm is sufficiently large (away from
-    degenerate regions where the denominator is near zero).
-    """
-    m_norm, tau_norm = normalizer.normalize(m, tau)
-    v_hat, sigma_hat = model(m_norm, tau_norm)
-
-    # Price derivatives
-    v_tau = torch.autograd.grad(v_hat, tau, grad_outputs=torch.ones_like(v_hat),
-                                create_graph=True)[0]
-    v_m = torch.autograd.grad(v_hat, m, grad_outputs=torch.ones_like(v_hat),
-                              create_graph=True)[0]
-    v_mm = torch.autograd.grad(v_m, m, grad_outputs=torch.ones_like(v_m),
-                               create_graph=True)[0]
-
-    # Dupire-implied sigma^2
-    numerator = 2.0 * (v_tau - (r - q) * v_m + r * v_hat)
-    denominator = v_mm - v_m
-
-    # Only use points where denominator is safely away from zero
-    denom_abs = torch.abs(denominator)
-    valid_mask = denom_abs > 0.01  # threshold to avoid division instability
-
-    # Compute sigma^2_dupire only at valid points
-    sigma2_dupire = numerator / (denominator + 1e-8)  # small eps for safety
-    sigma2_hat = sigma_hat ** 2
-
-    # Compute loss only at valid points
-    if valid_mask.any():
-        diff = (sigma2_hat[valid_mask] - sigma2_dupire[valid_mask]) ** 2
-        return torch.mean(diff)
-    else:
-        return torch.tensor(0.0, device=m.device)
 
 
 def terminal_condition_phase2(m):

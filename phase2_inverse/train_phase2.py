@@ -29,8 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from phase2_inverse.pinn_dual import (
     PINN_Dual, compute_pde_residual_phase2,
-    compute_smoothness_loss, compute_dupire_consistency_loss,
-    terminal_condition_phase2
+    compute_smoothness_loss, terminal_condition_phase2
 )
 from phase2_inverse.lv_surface import synthetic_lv_numpy, synthetic_lv_torch
 from phase2_inverse.fdm_solver import crank_nicolson_lv, extract_prices_at_observations
@@ -56,22 +55,21 @@ FDM_PARAMS = {
 
 TRAIN = {
     # Observation data
-    'n_strikes': 40,        # was 25 -- more strikes for better inverse conditioning
-    'n_maturities': 15,     # was 10 -- more maturities
+    'n_strikes': 40,
+    'n_maturities': 15,
     # Collocation points
-    'n_pde': 8_000,
+    'n_pde': 10_000,
     'n_ic': 300,
     # Loss weights
-    'lambda_data': 100.0,   # was 10.0 -- force much tighter price matching
+    'lambda_data': 100.0,
     'lambda_pde': 1.0,
-    'lambda_smooth': 0.005, # was 0.1 -- was too strong, flattened out the smile
-    'lambda_dupire': 10.0,  # NEW: Dupire consistency (sigma_hat == sigma_implied)
+    'lambda_smooth': 0.01,
     'lambda_ic': 5.0,
     # Adam phase
-    'adam_epochs': 15_000,   # was 10,000 -- more epochs for inverse problem
+    'adam_epochs': 15_000,
     'adam_lr': 1e-3,
     # L-BFGS phase
-    'lbfgs_iters': 3_000,   # was 2,000 -- more fine-tuning
+    'lbfgs_iters': 3_000,
     'lbfgs_lr': 1.0,
     'print_every': 500,
 }
@@ -177,13 +175,6 @@ def compute_loss(model, normalizer, data_tensors, bs_params, fdm_params,
     # Reuse PDE points for efficiency
     loss_smooth = compute_smoothness_loss(model, m_pde, tau_pde, normalizer)
 
-    # --- Dupire consistency loss ---
-    # Sample separate points (need fresh autograd graph)
-    m_dup, tau_dup = sample_pde_points(train_cfg['n_pde'] // 2, m_min, m_max,
-                                        tau_max, device)
-    loss_dupire = compute_dupire_consistency_loss(model, m_dup, tau_dup,
-                                                   normalizer, r, q)
-
     # --- IC loss: terminal condition at tau = 0 ---
     m_ic, tau_ic = sample_ic_points(train_cfg['n_ic'], m_min, m_max, device)
     m_ic_norm, tau_ic_norm = normalizer.normalize(m_ic, tau_ic)
@@ -195,7 +186,6 @@ def compute_loss(model, normalizer, data_tensors, bs_params, fdm_params,
     total = (train_cfg['lambda_data'] * loss_data +
              train_cfg['lambda_pde'] * loss_pde +
              train_cfg['lambda_smooth'] * loss_smooth +
-             train_cfg['lambda_dupire'] * loss_dupire +
              train_cfg['lambda_ic'] * loss_ic)
 
     return total, {
@@ -203,7 +193,6 @@ def compute_loss(model, normalizer, data_tensors, bs_params, fdm_params,
         'data': loss_data.item(),
         'pde': loss_pde.item(),
         'smooth': loss_smooth.item(),
-        'dupire': loss_dupire.item(),
         'ic': loss_ic.item(),
     }
 
@@ -224,7 +213,7 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
     v_obs_t = torch.tensor(data['v_obs'], dtype=torch.float32, device=device).unsqueeze(-1)
     data_tensors = (m_obs_t, tau_obs_t, v_obs_t)
 
-    history = {'total': [], 'data': [], 'pde': [], 'smooth': [], 'dupire': [], 'ic': []}
+    history = {'total': [], 'data': [], 'pde': [], 'smooth': [], 'ic': []}
 
     # ══════════════════════════════════════════════════════════════════════════
     # Phase A: Adam
@@ -255,7 +244,7 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
             lr_now = optimizer.param_groups[0]['lr']
             print(f"  Epoch {epoch:>5d} | Total={losses['total']:.3e} | "
                   f"Data={losses['data']:.3e} | PDE={losses['pde']:.3e} | "
-                  f"Dup={losses['dupire']:.3e} | IC={losses['ic']:.3e} | "
+                  f"Smooth={losses['smooth']:.3e} | IC={losses['ic']:.3e} | "
                   f"lr={lr_now:.2e} | {elapsed:.1f}s")
 
     adam_time = time.time() - t0
@@ -292,7 +281,7 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
         if lbfgs_iter[0] % 100 == 0 or lbfgs_iter[0] == 1:
             print(f"  L-BFGS iter {lbfgs_iter[0]:>5d} | Total={losses['total']:.3e} | "
                   f"Data={losses['data']:.3e} | PDE={losses['pde']:.3e} | "
-                  f"Dup={losses['dupire']:.3e}")
+                  f"Smooth={losses['smooth']:.3e}")
 
         for k in history:
             history[k].append(losses[k])

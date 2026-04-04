@@ -60,8 +60,8 @@ def generate_observation_grid(S0=100.0, r=0.05, q=0.015,
     tau_obs : 1D array of time-to-maturity values
     (These are flattened grids, total points = n_strikes * n_maturities)
     """
-    # Strikes: tighter near ATM, wider in the wings
     # m = ln(S/K): m > 0 is ITM, m < 0 is OTM for a call
+    # Covers [-0.3, 0.3] -- matches the training domain
     m_values = np.linspace(-0.3, 0.3, n_strikes)
 
     # Maturities: from 1 month to 1 year

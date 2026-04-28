@@ -51,26 +51,30 @@ def crank_nicolson_lv(sigma_func, r=0.05, q=0.015,
     V        : 2D array of shape (N_m, N_tau+1) -- normalized price v(m, tau)
     """
     # Grids
-    dm = (m_max - m_min) / (N_m - 1)
-    dtau = tau_max / N_tau
+    dm = (m_max - m_min) / (N_m - 1) # m = ln(S/K)
+    dtau = tau_max / N_tau # tau = T - t
     m_grid = np.linspace(m_min, m_max, N_m)
     tau_grid = np.linspace(0, tau_max, N_tau + 1)
 
     # Solution array: V[i, n] = v(m_i, tau_n)
-    V = np.zeros((N_m, N_tau + 1))
+    V = np.zeros((N_m, N_tau + 1)) # V is the normalized price v(m, tau). We are getting the V for each m and tau (3D surface)
 
-    # Initial condition (tau = 0): v(m, 0) = max(exp(m) - 1, 0)
-    V[:, 0] = np.maximum(np.exp(m_grid) - 1.0, 0.0)
+    # Initial condition (tau = 0): v(m, 0) = max(exp(m) - 1, 0). Condition exactly at t=T. 
+    # For all m at t=T. (payoff of a call option at maturity)
+    # This is not a boundary condition, but the initial condition for the PDE solver.
+    V[:, 0] = np.maximum(np.exp(m_grid) - 1.0, 0.0) 
+    # This is the call price at time t=T (maturity). At maturity => V(S,T)=max(S−K,0). 
+    # We are using normalized price v = V/K => v(m,0) = max(S/K - 1, 0) = max(exp(m)-1, 0)
 
     # Interior indices (exclude boundaries i=0 and i=N_m-1)
     N_int = N_m - 2  # number of interior points
 
-    # Time-stepping: march forward in tau
+    # Time-stepping: march forward in tau. Starting at t=T (tau=0) and going backwards to t=0 (tau=T).
     for n in range(N_tau):
-        tau_n = tau_grid[n]
-        tau_np1 = tau_grid[n + 1]
+        tau_n = tau_grid[n] # current time level (known)
+        tau_np1 = tau_grid[n + 1] # next time level (unknown)
 
-        # Evaluate local volatility at both time levels (for CN averaging)
+        # Evaluate local volatility at both time levels (for Crank-Nicolson averaging) 
         sigma_n = sigma_func(m_grid[1:-1], tau_n)      # interior points at tau_n
         sigma_np1 = sigma_func(m_grid[1:-1], tau_np1)  # interior points at tau_{n+1}
 
@@ -96,21 +100,21 @@ def crank_nicolson_lv(sigma_func, r=0.05, q=0.015,
 
         rhs = np.zeros(N_int)
         for i in range(N_int):
-            rhs[i] = v_int[i] + 0.5 * dtau * main_n[i] * v_int[i]
+            rhs[i] = v_int[i] + 0.5 * dtau * main_n[i] * v_int[i] # Known terms at time n
             if i > 0:
-                rhs[i] += 0.5 * dtau * sub_n[i] * v_int[i - 1]
+                rhs[i] += 0.5 * dtau * sub_n[i] * v_int[i - 1] 
             else:
                 # v_{i-1} = V[0, n] (left boundary)
-                rhs[i] += 0.5 * dtau * sub_n[i] * V[0, n]
+                rhs[i] += 0.5 * dtau * sub_n[i] * V[0, n] # This is because v_int is for interior points, so we need to add the boundary points manually
             if i < N_int - 1:
                 rhs[i] += 0.5 * dtau * sup_n[i] * v_int[i + 1]
             else:
                 # v_{i+1} = V[N_m-1, n] (right boundary)
-                rhs[i] += 0.5 * dtau * sup_n[i] * V[-1, n]
+                rhs[i] += 0.5 * dtau * sup_n[i] * V[-1, n] # This is because v_int is for interior points, so we need to add the boundary points manually
 
         # --- Apply boundary conditions at tau_{n+1} ---
-        V[0, n + 1] = 0.0  # deep OTM
-        V[-1, n + 1] = np.exp(m_max) * np.exp(-q * tau_np1) - np.exp(-r * tau_np1)  # deep ITM
+        V[0, n + 1] = 0.0  # deep OTM (As S->0, V=0)
+        V[-1, n + 1] = np.exp(m_max) * np.exp(-q * tau_np1) - np.exp(-r * tau_np1)  # deep ITM (As S->inf, V=S*exp(-qT)-K*exp(-rT))
 
         # Add boundary contributions to RHS from the implicit side
         # (I - dtau/2 * L_{n+1}) v^{n+1} = rhs

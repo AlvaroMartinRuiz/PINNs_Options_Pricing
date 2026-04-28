@@ -55,8 +55,8 @@ FDM_PARAMS = {
 
 TRAIN = {
     # Observation data
-    'n_strikes': 40,
-    'n_maturities': 15,
+    'n_strikes': 40, # 60,
+    'n_maturities': 15, # 30,
     # Collocation points
     'n_pde': 10_000,
     'n_ic': 300,

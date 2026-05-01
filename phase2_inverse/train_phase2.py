@@ -63,13 +63,13 @@ TRAIN = {
     'n_ic': 300,
     # Loss weights (initial)
     'lambda_data': 10.0,
-    'lambda_pde': 1.0,
-    'lambda_smooth': 0.05,
+    'lambda_pde': 2.0,
+    'lambda_smooth': 0.1,
     'lambda_ic': 1.0,
     # Target Gradient Ratios (Loss Balancer)
-    'ratio_data': 1.0,
-    'ratio_pde': 1.0,
-    'ratio_smooth': 0.01,
+    'ratio_data': 5.0,
+    'ratio_pde': 2.0,
+    'ratio_smooth': 0.1,
     'ratio_ic': 1.0,
     # Adam phase
     'adam_epochs': 15_000,

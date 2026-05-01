@@ -414,6 +414,19 @@ def validate(model, normalizer, data, bs_params, fdm_params,
                                             m_grid.flatten(), tau_grid.flatten())
     price_rmse = np.sqrt(np.mean((v_pred_np - v_true)**2))
 
+    # Check IC (Payoff) accuracy at tau=0
+    m_ic_eval = np.linspace(-1.5, 1.5, 200)
+    m_ic_tensor = torch.tensor(m_ic_eval, dtype=torch.float32).unsqueeze(-1).to(next(model.parameters()).device)
+    tau_ic_tensor = torch.zeros_like(m_ic_tensor)
+    
+    with torch.no_grad():
+        m_ic_norm, tau_ic_norm = normalizer.normalize(m_ic_tensor, tau_ic_tensor)
+        v_ic_pred, _ = model(m_ic_norm, tau_ic_norm)
+        v_ic_pred_np = v_ic_pred.cpu().numpy().flatten()
+        
+    v_ic_true = np.maximum(np.exp(m_ic_eval) - 1.0, 0.0)
+    payoff_rmse = np.sqrt(np.mean((v_ic_pred_np - v_ic_true)**2))
+
     print("=" * 70)
     print("  Phase 2 Validation: Recovered sigma vs Ground Truth")
     print("=" * 70)
@@ -425,6 +438,7 @@ def validate(model, normalizer, data, bs_params, fdm_params,
     print(f"    Within 10% of true   : {pct_within_10:.1f}%")
     print(f"\n  Price Accuracy:")
     print(f"    RMSE(v)              : {price_rmse:.6f}")
+    print(f"    RMSE(payoff)         : {payoff_rmse:.6f}")
 
     pass_test = pct_within_5 >= 80.0
     print(f"\n  Pass (>80% within 5%)? : {'YES' if pass_test else 'NO'} ({pct_within_5:.1f}%)")
@@ -496,6 +510,20 @@ def validate(model, normalizer, data, bs_params, fdm_params,
     fig3.savefig(os.path.join(results_dir, 'vol_smile.png'), dpi=150)
     print(f"  Saved: {os.path.join(results_dir, 'vol_smile.png')}")
     plt.close(fig3)
+
+    # --- Plot 4: Payoff Check at tau=0 ---
+    fig4, ax4 = plt.subplots(figsize=(8, 5))
+    ax4.plot(m_ic_eval, v_ic_true, 'b--', linewidth=2, label='True Payoff')
+    ax4.plot(m_ic_eval, v_ic_pred_np, 'r-', linewidth=1.5, label='PINN Predicted')
+    ax4.set_xlabel('m = ln(S/K)', fontsize=13)
+    ax4.set_ylabel('Normalized Price', fontsize=13)
+    ax4.set_title('Payoff Condition Check (tau=0)', fontsize=14, fontweight='bold')
+    ax4.legend(fontsize=12)
+    ax4.grid(True, alpha=0.3)
+    fig4.tight_layout()
+    fig4.savefig(os.path.join(results_dir, 'payoff_check.png'), dpi=150)
+    print(f"  Saved: {os.path.join(results_dir, 'payoff_check.png')}")
+    plt.close(fig4)
 
     return {
         'rmse_sigma': rmse, 'mae_sigma': mae, 'max_abs_sigma': max_abs,

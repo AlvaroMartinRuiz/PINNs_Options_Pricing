@@ -131,7 +131,7 @@ def crank_nicolson_lv(sigma_func, r=0.05, q=0.015,
         ab[2, :-1] = -0.5 * dtau * sub_np1[1:]        # sub-diagonal (shifted)
 
         # Solve the tridiagonal system
-        V[1:-1, n + 1] = solve_banded((1, 1), ab, rhs)
+        V[1:-1, n + 1] = solve_banded((1, 1), ab, rhs) # Solving the tridiagonal system we get the prices (V, which is the normalized price)
 
     return m_grid, tau_grid, V
 

@@ -35,6 +35,7 @@ from phase2_inverse.lv_surface import synthetic_lv_numpy, synthetic_lv_torch
 from phase2_inverse.fdm_solver import crank_nicolson_lv, extract_prices_at_observations
 from utils.normalization import LogMoneynessNormalizer
 from utils.plotting import plot_loss_history
+from phase2_inverse.loss_balancer import LossBalancer
 
 
 # ── Default Parameters ───────────────────────────────────────────────────────
@@ -60,11 +61,16 @@ TRAIN = {
     # Collocation points
     'n_pde': 10_000,
     'n_ic': 300,
-    # Loss weights
-    'lambda_data': 100.0,
+    # Loss weights (initial)
+    'lambda_data': 10.0,
     'lambda_pde': 1.0,
-    'lambda_smooth': 0.01,
-    'lambda_ic': 5.0,
+    'lambda_smooth': 0.05,
+    'lambda_ic': 1.0,
+    # Target Gradient Ratios (Loss Balancer)
+    'ratio_data': 1.0,
+    'ratio_pde': 1.0,
+    'ratio_smooth': 0.01,
+    'ratio_ic': 1.0,
     # Adam phase
     'adam_epochs': 15_000,
     'adam_lr': 1e-3,
@@ -182,19 +188,14 @@ def compute_loss(model, normalizer, data_tensors, bs_params, fdm_params,
     v_ic_exact = terminal_condition_phase2(m_ic)
     loss_ic = torch.mean((v_ic_pred - v_ic_exact) ** 2)
 
-    # --- Weighted total ---
-    total = (train_cfg['lambda_data'] * loss_data +
-             train_cfg['lambda_pde'] * loss_pde +
-             train_cfg['lambda_smooth'] * loss_smooth +
-             train_cfg['lambda_ic'] * loss_ic)
-
-    return total, {
-        'total': total.item(),
-        'data': loss_data.item(),
-        'pde': loss_pde.item(),
-        'smooth': loss_smooth.item(),
-        'ic': loss_ic.item(),
+    losses_tensors = {
+        'data': loss_data,
+        'pde': loss_pde,
+        'smooth': loss_smooth,
+        'ic': loss_ic,
     }
+
+    return losses_tensors
 
 
 # ── Training Loop ────────────────────────────────────────────────────────────
@@ -214,6 +215,26 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
     data_tensors = (m_obs_t, tau_obs_t, v_obs_t)
 
     history = {'total': [], 'data': [], 'pde': [], 'smooth': [], 'ic': []}
+    weight_history = {'data': [], 'pde': [], 'smooth': [], 'ic': []}
+
+    # Initialize Loss Balancer
+    init_weights = {
+        'data': train_cfg['lambda_data'],
+        'pde': train_cfg['lambda_pde'],
+        'smooth': train_cfg['lambda_smooth'],
+        'ic': train_cfg['lambda_ic']
+    }
+    target_ratios = {
+        'data': train_cfg.get('ratio_data', 1.0),
+        'pde': train_cfg.get('ratio_pde', 1.0),
+        'smooth': train_cfg.get('ratio_smooth', 1.0),
+        'ic': train_cfg.get('ratio_ic', 1.0)
+    }
+    # Balance gradients with respect to the price network parameters
+    balancer = LossBalancer(model.parameters(), init_weights, 
+                        target_ratios=target_ratios, alpha=0.9, update_freq=100)
+
+
 
     # ══════════════════════════════════════════════════════════════════════════
     # Phase A: Adam
@@ -230,22 +251,40 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
 
     for epoch in range(1, train_cfg['adam_epochs'] + 1):
         optimizer.zero_grad()
-        loss, losses = compute_loss(model, normalizer, data_tensors,
-                                     bs_params, fdm_params, train_cfg, device)
+        losses_tensors = compute_loss(model, normalizer, data_tensors,
+                                      bs_params, fdm_params, train_cfg, device)
+
+        # --- Adaptive weight update (every update_freq steps) ---
+        # Compute per-component grad norms and update balancer weights.
+        # compute_per_component_grad_norms does individual backward passes
+        # for each loss, leaves grads zeroed at exit.
+        grad_norms = balancer.compute_per_component_grad_norms(losses_tensors)
+        weights = balancer.get_weights()
+        balancer.update(grad_norms)
+
+        # --- Main backward with current (possibly just-updated) weights ---
+        loss = (weights['data'] * losses_tensors['data'] +
+                weights['pde'] * losses_tensors['pde'] +
+                weights['smooth'] * losses_tensors['smooth'] +
+                weights['ic'] * losses_tensors['ic'])
         loss.backward()
         optimizer.step()
         scheduler.step()
 
-        for k in history:
-            history[k].append(losses[k])
+        # Record history
+        total_item = loss.item()
+        history['total'].append(total_item)
+        for k in ['data', 'pde', 'smooth', 'ic']:
+            history[k].append(losses_tensors[k].item())
+            weight_history[k].append(weights[k])
 
         if epoch % train_cfg['print_every'] == 0 or epoch == 1:
             elapsed = time.time() - t0
             lr_now = optimizer.param_groups[0]['lr']
-            print(f"  Epoch {epoch:>5d} | Total={losses['total']:.3e} | "
-                  f"Data={losses['data']:.3e} | PDE={losses['pde']:.3e} | "
-                  f"Smooth={losses['smooth']:.3e} | IC={losses['ic']:.3e} | "
-                  f"lr={lr_now:.2e} | {elapsed:.1f}s")
+            print(f"  Epoch {epoch:>5d} | Total={total_item:.3e} | "
+                  f"Data={losses_tensors['data'].item():.3e} | PDE={losses_tensors['pde'].item():.3e} | "
+                  f"Smooth={losses_tensors['smooth'].item():.3e} | IC={losses_tensors['ic'].item():.3e} | "
+                  f"w_pde={weights['pde']:.1f} | lr={lr_now:.2e} | {elapsed:.1f}s")
 
     adam_time = time.time() - t0
     print(f"\n  Adam finished in {adam_time:.1f}s\n")
@@ -273,18 +312,29 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
 
     def closure():
         lbfgs_optimizer.zero_grad()
-        loss, losses = compute_loss(model, normalizer, data_tensors,
-                                     bs_params, fdm_params, train_cfg, device)
+        losses_tensors = compute_loss(model, normalizer, data_tensors,
+                                      bs_params, fdm_params, train_cfg, device)
+        
+        weights = balancer.get_weights()
+        loss = (weights['data'] * losses_tensors['data'] +
+                weights['pde'] * losses_tensors['pde'] +
+                weights['smooth'] * losses_tensors['smooth'] +
+                weights['ic'] * losses_tensors['ic'])
+                
         loss.backward()
 
         lbfgs_iter[0] += 1
+        total_item = loss.item()
+        
         if lbfgs_iter[0] % 100 == 0 or lbfgs_iter[0] == 1:
-            print(f"  L-BFGS iter {lbfgs_iter[0]:>5d} | Total={losses['total']:.3e} | "
-                  f"Data={losses['data']:.3e} | PDE={losses['pde']:.3e} | "
-                  f"Smooth={losses['smooth']:.3e}")
+            print(f"  L-BFGS iter {lbfgs_iter[0]:>5d} | Total={total_item:.3e} | "
+                  f"Data={losses_tensors['data'].item():.3e} | PDE={losses_tensors['pde'].item():.3e} | "
+                  f"Smooth={losses_tensors['smooth'].item():.3e}")
 
-        for k in history:
-            history[k].append(losses[k])
+        history['total'].append(total_item)
+        for k in ['data', 'pde', 'smooth', 'ic']:
+            history[k].append(losses_tensors[k].item())
+            weight_history[k].append(weights[k])
 
         return loss
 
@@ -303,9 +353,11 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
         'fdm_params': fdm_params,
         'train_cfg': train_cfg,
         'history': history,
+        'weight_history': weight_history,   # saved separately to avoid plot crash
     }, model_path)
     print(f"  Model saved: {model_path}")
 
+    # plot_loss_history only accepts numeric series — pass history without weights
     plot_loss_history(history,
                       save_path=os.path.join(results_dir, 'loss_history.png'),
                       show=False)

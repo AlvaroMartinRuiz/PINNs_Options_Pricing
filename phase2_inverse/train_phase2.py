@@ -66,7 +66,7 @@ TRAIN = {
     'lambda_pde': 1.0,
     'lambda_smooth': 0.05,
     'lambda_ic': 1.0,
-    # Target Gradient Ratios (Loss Balancer)
+    # Target Gradien t Ratios (Loss Balancer)
     'ratio_data': 1.0,
     'ratio_pde': 1.0,
     'ratio_smooth': 0.01,

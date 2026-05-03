@@ -56,26 +56,26 @@ FDM_PARAMS = {
 
 TRAIN = {
     # Observation data
-    'n_strikes': 40, # 60,
-    'n_maturities': 15, # 30,
+    'n_strikes': 60, # 40, 
+    'n_maturities': 30, # 15, 
     # Collocation points
     'n_pde': 10_000,
     'n_ic': 300,
     # Loss weights (initial)
-    'lambda_data': 10.0,
+    'lambda_data': 100.0,
     'lambda_pde': 2.0,
-    'lambda_smooth': 0.01,
-    'lambda_ic': 1.0,
+    'lambda_smooth': 0.1,
+    'lambda_ic': 5.0,
     # Target Gradient Ratios (Loss Balancer)
-    'ratio_data': 8.0,
-    'ratio_pde': 2.0,
+    'ratio_data': 5.0,
+    'ratio_pde': 3.0,
     'ratio_smooth': 0.1,
     'ratio_ic': 1.0,
     # Adam phase
     'adam_epochs': 15_000,
     'adam_lr': 1e-3,
     # L-BFGS phase
-    'lbfgs_iters': 3_000,
+    'lbfgs_iters': 5_000, # 3_000,
     'lbfgs_lr': 1.0,
     'print_every': 500,
 }

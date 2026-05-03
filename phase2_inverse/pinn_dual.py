@@ -181,7 +181,12 @@ def compute_smoothness_loss(model, m, tau, normalizer):
                                        grad_outputs=torch.ones_like(sigma_tau),
                                        create_graph=True)[0]
 
-    return torch.mean(sigma_mm**2 + sigma_tautau**2)
+    # The natural curvature of the smile (m-direction) is much higher than the term structure (tau-direction).
+    # We apply a smaller weight to sigma_mm to allow the smile to form naturally without being over-penalized.
+    weight_m = 0.01
+    weight_tau = 1.0
+
+    return torch.mean(weight_m * sigma_mm**2 + weight_tau * sigma_tautau**2)
 
 
 def terminal_condition_phase2(m):

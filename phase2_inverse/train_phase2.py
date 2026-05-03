@@ -56,20 +56,20 @@ FDM_PARAMS = {
 
 TRAIN = {
     # Observation data
-    'n_strikes': 60, # 40, 
-    'n_maturities': 30, # 15, 
+    'n_strikes': 40, # 60, 
+    'n_maturities': 15, # 30, 
     # Collocation points
     'n_pde': 10_000,
     'n_ic': 300,
     # Loss weights (initial)
     'lambda_data': 100.0,
     'lambda_pde': 2.0,
-    'lambda_smooth': 0.1,
+    'lambda_smooth': 0.001,
     'lambda_ic': 5.0,
     # Target Gradient Ratios (Loss Balancer)
     'ratio_data': 5.0,
     'ratio_pde': 3.0,
-    'ratio_smooth': 0.1,
+    'ratio_smooth': 0.001,
     'ratio_ic': 1.0,
     # Adam phase
     'adam_epochs': 15_000,

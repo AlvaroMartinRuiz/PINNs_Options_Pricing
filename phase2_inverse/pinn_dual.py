@@ -152,26 +152,41 @@ def compute_pde_residual_phase2(model, m, tau, normalizer, r, q):
                 - (r - q - 0.5 * sigma2) * v_m
                 + r * v_hat)
 
-    return residual
+    return residual, v_tau, v_m, v_mm
 
 
 def compute_smoothness_loss(model, m, tau, normalizer):
     """
-    Tikhonov regularization on the volatility surface: ||grad(sigma)||^2.
-
-    This prevents wild oscillations in the recovered volatility.
+    Tikhonov regularization on the volatility surface: ||Laplacian(sigma)||^2.
+    
+    Penalizing the second derivatives (roughness/curvature) allows the network 
+    to learn natural slopes and smiles, while preventing wild oscillations.
     """
     m_norm, tau_norm = normalizer.normalize(m, tau)
     _, sigma_hat = model(m_norm, tau_norm)
 
+    # First derivatives
     sigma_m = torch.autograd.grad(sigma_hat, m,
                                   grad_outputs=torch.ones_like(sigma_hat),
                                   create_graph=True)[0]
     sigma_tau = torch.autograd.grad(sigma_hat, tau,
                                     grad_outputs=torch.ones_like(sigma_hat),
                                     create_graph=True)[0]
+                                    
+    # Second derivatives
+    sigma_mm = torch.autograd.grad(sigma_m, m,
+                                   grad_outputs=torch.ones_like(sigma_m),
+                                   create_graph=True)[0]
+    sigma_tautau = torch.autograd.grad(sigma_tau, tau,
+                                       grad_outputs=torch.ones_like(sigma_tau),
+                                       create_graph=True)[0]
 
-    return torch.mean(sigma_m**2 + sigma_tau**2)
+    # The natural curvature of the smile (m-direction) is much higher than the term structure (tau-direction).
+    # We apply a smaller weight to sigma_mm to allow the smile to form naturally without being over-penalized.
+    weight_m = 0.01
+    weight_tau = 1.0
+
+    return torch.mean(weight_m * sigma_mm**2 + weight_tau * sigma_tautau**2)
 
 
 def terminal_condition_phase2(m):

@@ -152,7 +152,7 @@ def compute_pde_residual_phase2(model, m, tau, normalizer, r, q):
                 - (r - q - 0.5 * sigma2) * v_m
                 + r * v_hat)
 
-    return residual
+    return residual, v_tau, v_m, v_mm
 
 
 def compute_smoothness_loss(model, m, tau, normalizer):

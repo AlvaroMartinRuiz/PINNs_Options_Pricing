@@ -20,6 +20,7 @@ import time
 import argparse
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -56,16 +57,19 @@ FDM_PARAMS = {
 
 TRAIN = {
     # Observation data
-    'n_strikes': 40, # 60, 
-    'n_maturities': 15, # 30, 
+    'n_strikes': 60, #40, # 60, 
+    'n_maturities': 30, #15, # 30, 
     # Collocation points
     'n_pde': 10_000,
     'n_ic': 300,
     # Loss weights (initial)
-    'lambda_data': 100.0,
-    'lambda_pde': 2.0,
+    'lambda_data': 10.0,
+    'lambda_pde': 5.0,
     'lambda_smooth': 0.001,
-    'lambda_ic': 5.0,
+    'lambda_ic': 3.0,
+    'lambda_arb': 5.0,
+    # Loss Balancer
+    'use_loss_balancer': False,
     # Target Gradient Ratios (Loss Balancer)
     'ratio_data': 5.0,
     'ratio_pde': 3.0,
@@ -76,7 +80,7 @@ TRAIN = {
     'adam_lr': 1e-3,
     # L-BFGS phase
     'lbfgs_iters': 5_000, # 3_000,
-    'lbfgs_lr': 1.0,
+    'lbfgs_lr': 0.1,
     'print_every': 500,
 }
 
@@ -152,7 +156,7 @@ def sample_ic_points(n, m_min, m_max, device):
 # %% Cell: Loss Computation
 
 def compute_loss(model, normalizer, data_tensors, bs_params, fdm_params,
-                 train_cfg, device):
+                 train_cfg, device, fixed_pde=None, fixed_ic=None):
     """
     Compute total loss = lam_data*L_data + lam_pde*L_pde
                        + lam_smooth*L_smooth + lam_ic*L_ic.
@@ -171,18 +175,33 @@ def compute_loss(model, normalizer, data_tensors, bs_params, fdm_params,
     loss_data = torch.mean((v_pred - v_obs) ** 2)
 
     # --- PDE loss: residual at random interior points ---
-    m_pde, tau_pde = sample_pde_points(train_cfg['n_pde'], m_min, m_max,
-                                        tau_max, device)
-    residual = compute_pde_residual_phase2(model, m_pde, tau_pde,
+    if fixed_pde is not None:
+        m_pde, tau_pde = fixed_pde
+    else:
+        m_pde, tau_pde = sample_pde_points(train_cfg['n_pde'], m_min, m_max,
+                                            tau_max, device)
+    residual, v_tau, v_m, v_mm = compute_pde_residual_phase2(model, m_pde, tau_pde,
                                             normalizer, r, q)
     loss_pde = torch.mean(residual ** 2)
+
+    # --- Arbitrage-Free Constraints ---
+    # Calendar Spread: v_tau >= 0
+    # Using C^2 continuous ReLU^3 to ensure infinite differentiability for L-BFGS
+    # while strictly pinning the penalty at exactly zero for valid non-arbitrage points.
+    calendar_penalty = torch.mean(torch.relu(-v_tau)**3)
+    # Butterfly Spread: v_mm - v_m >= 0 (convexity in log-moneyness)
+    butterfly_penalty = torch.mean(torch.relu(-(v_mm - v_m))**3)
+    loss_arb = calendar_penalty + butterfly_penalty
 
     # --- Smoothness loss: Tikhonov on sigma ---
     # Reuse PDE points for efficiency
     loss_smooth = compute_smoothness_loss(model, m_pde, tau_pde, normalizer)
 
     # --- IC loss: terminal condition at tau = 0 ---
-    m_ic, tau_ic = sample_ic_points(train_cfg['n_ic'], m_min, m_max, device)
+    if fixed_ic is not None:
+        m_ic, tau_ic = fixed_ic
+    else:
+        m_ic, tau_ic = sample_ic_points(train_cfg['n_ic'], m_min, m_max, device)
     m_ic_norm, tau_ic_norm = normalizer.normalize(m_ic, tau_ic)
     v_ic_pred, _ = model(m_ic_norm, tau_ic_norm)
     v_ic_exact = terminal_condition_phase2(m_ic)
@@ -193,9 +212,45 @@ def compute_loss(model, normalizer, data_tensors, bs_params, fdm_params,
         'pde': loss_pde,
         'smooth': loss_smooth,
         'ic': loss_ic,
+        'arb': loss_arb,
     }
 
     return losses_tensors
+
+
+# ── Volatility Pre-training ──────────────────────────────────────────────────
+def pretrain_vol_network(model, normalizer, fdm_params, device, epochs=500, target_sigma=0.3):
+    """
+    Pre-trains the volatility network to a flat surface (e.g., sigma=0.3).
+    This provides a neutral starting plane and prevents the optimizer from 
+    getting stuck in random initial wavy local minima.
+    """
+    print("=" * 70)
+    print(f"  Phase 0: Pre-training Volatility Network (target sigma={target_sigma})")
+    print("=" * 70)
+    
+    optimizer = torch.optim.Adam(model.vol_net.parameters(), lr=1e-3)
+    m_min, m_max = fdm_params['m_min'], fdm_params['m_max']
+    tau_max = fdm_params['tau_max']
+    
+    model.train()
+    for ep in range(epochs):
+        optimizer.zero_grad()
+        
+        # Sample points
+        m = (m_max - m_min) * torch.rand(1000, 1, device=device) + m_min
+        tau = tau_max * torch.rand(1000, 1, device=device)
+        
+        m_norm, tau_norm = normalizer.normalize(m, tau)
+        _, sigma_hat = model(m_norm, tau_norm)
+        
+        loss = torch.mean((sigma_hat - target_sigma) ** 2)
+        loss.backward()
+        optimizer.step()
+        
+        if (ep + 1) % 100 == 0:
+            print(f"  Pre-train Epoch {ep+1}/{epochs} | MSE Loss: {loss.item():.2e}")
+    print("  Pre-training complete.\n")
 
 
 # ── Training Loop ────────────────────────────────────────────────────────────
@@ -214,27 +269,30 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
     v_obs_t = torch.tensor(data['v_obs'], dtype=torch.float32, device=device).unsqueeze(-1)
     data_tensors = (m_obs_t, tau_obs_t, v_obs_t)
 
-    history = {'total': [], 'data': [], 'pde': [], 'smooth': [], 'ic': []}
-    weight_history = {'data': [], 'pde': [], 'smooth': [], 'ic': []}
+    history = {'total': [], 'data': [], 'pde': [], 'smooth': [], 'ic': [], 'arb': []}
+    weight_history = {'data': [], 'pde': [], 'smooth': [], 'ic': [], 'arb': []}
 
     # Initialize Loss Balancer
     init_weights = {
         'data': train_cfg['lambda_data'],
         'pde': train_cfg['lambda_pde'],
         'smooth': train_cfg['lambda_smooth'],
-        'ic': train_cfg['lambda_ic']
+        'ic': train_cfg['lambda_ic'],
+        'arb': train_cfg.get('lambda_arb', 1.0)
     }
     target_ratios = {
         'data': train_cfg.get('ratio_data', 1.0),
         'pde': train_cfg.get('ratio_pde', 1.0),
         'smooth': train_cfg.get('ratio_smooth', 1.0),
-        'ic': train_cfg.get('ratio_ic', 1.0)
+        'ic': train_cfg.get('ratio_ic', 1.0),
+        'arb': train_cfg.get('ratio_arb', 1.0)
     }
     # Balance gradients with respect to the price network parameters
     balancer = LossBalancer(model.parameters(), init_weights, 
                         target_ratios=target_ratios, alpha=0.9, update_freq=100)
 
-
+    # Pre-train Volatility Network
+    pretrain_vol_network(model, normalizer, fdm_params, device)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Phase A: Adam
@@ -255,18 +313,17 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
                                       bs_params, fdm_params, train_cfg, device)
 
         # --- Adaptive weight update (every update_freq steps) ---
-        # Compute per-component grad norms and update balancer weights.
-        # compute_per_component_grad_norms does individual backward passes
-        # for each loss, leaves grads zeroed at exit.
-        grad_norms = balancer.compute_per_component_grad_norms(losses_tensors)
+        if train_cfg.get('use_loss_balancer', False):
+            grad_norms = balancer.compute_per_component_grad_norms(losses_tensors)
+            balancer.update(grad_norms)
         weights = balancer.get_weights()
-        balancer.update(grad_norms)
 
         # --- Main backward with current (possibly just-updated) weights ---
         loss = (weights['data'] * losses_tensors['data'] +
                 weights['pde'] * losses_tensors['pde'] +
                 weights['smooth'] * losses_tensors['smooth'] +
-                weights['ic'] * losses_tensors['ic'])
+                weights['ic'] * losses_tensors['ic'] +
+                weights['arb'] * losses_tensors['arb'])
         loss.backward()
         optimizer.step()
         scheduler.step()
@@ -274,7 +331,7 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
         # Record history
         total_item = loss.item()
         history['total'].append(total_item)
-        for k in ['data', 'pde', 'smooth', 'ic']:
+        for k in ['data', 'pde', 'smooth', 'ic', 'arb']:
             history[k].append(losses_tensors[k].item())
             weight_history[k].append(weights[k])
 
@@ -283,8 +340,8 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
             lr_now = optimizer.param_groups[0]['lr']
             print(f"  Epoch {epoch:>5d} | Total={total_item:.3e} | "
                   f"Data={losses_tensors['data'].item():.3e} | PDE={losses_tensors['pde'].item():.3e} | "
-                  f"Smooth={losses_tensors['smooth'].item():.3e} | IC={losses_tensors['ic'].item():.3e} | "
-                  f"w_pde={weights['pde']:.1f} | lr={lr_now:.2e} | {elapsed:.1f}s")
+                  f"Smooth={losses_tensors['smooth'].item():.3e} | IC={losses_tensors['ic'].item():.3e} | Arb={losses_tensors['arb'].item():.3e} | "
+                  f"lr={lr_now:.2e} | {elapsed:.1f}s")
 
     adam_time = time.time() - t0
     print(f"\n  Adam finished in {adam_time:.1f}s\n")
@@ -295,6 +352,12 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
     print("=" * 70)
     print(f"  Phase B: L-BFGS ({train_cfg['lbfgs_iters']} max iterations)")
     print("=" * 70)
+
+    # Freeze collocation points for deterministic L-BFGS evaluation
+    m_min_b, m_max_b = fdm_params['m_min'], fdm_params['m_max']
+    tau_max_b = fdm_params['tau_max']
+    fixed_pde = sample_pde_points(train_cfg['n_pde'], m_min_b, m_max_b, tau_max_b, device)
+    fixed_ic = sample_ic_points(train_cfg['n_ic'], m_min_b, m_max_b, device)
 
     lbfgs_optimizer = torch.optim.LBFGS(
         model.parameters(),
@@ -313,13 +376,15 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
     def closure():
         lbfgs_optimizer.zero_grad()
         losses_tensors = compute_loss(model, normalizer, data_tensors,
-                                      bs_params, fdm_params, train_cfg, device)
+                                      bs_params, fdm_params, train_cfg, device,
+                                      fixed_pde=fixed_pde, fixed_ic=fixed_ic)
         
         weights = balancer.get_weights()
         loss = (weights['data'] * losses_tensors['data'] +
                 weights['pde'] * losses_tensors['pde'] +
                 weights['smooth'] * losses_tensors['smooth'] +
-                weights['ic'] * losses_tensors['ic'])
+                weights['ic'] * losses_tensors['ic'] +
+                weights['arb'] * losses_tensors['arb'])
                 
         loss.backward()
 
@@ -329,10 +394,10 @@ def train(model, normalizer, data, bs_params, fdm_params, train_cfg,
         if lbfgs_iter[0] % 100 == 0 or lbfgs_iter[0] == 1:
             print(f"  L-BFGS iter {lbfgs_iter[0]:>5d} | Total={total_item:.3e} | "
                   f"Data={losses_tensors['data'].item():.3e} | PDE={losses_tensors['pde'].item():.3e} | "
-                  f"Smooth={losses_tensors['smooth'].item():.3e}")
+                  f"Smooth={losses_tensors['smooth'].item():.3e} | Arb={losses_tensors['arb'].item():.3e}")
 
         history['total'].append(total_item)
-        for k in ['data', 'pde', 'smooth', 'ic']:
+        for k in ['data', 'pde', 'smooth', 'ic', 'arb']:
             history[k].append(losses_tensors[k].item())
             weight_history[k].append(weights[k])
 

@@ -152,15 +152,20 @@ def compute_pde_residual_phase2(model, m, tau, normalizer, r, q):
                 - (r - q - 0.5 * sigma2) * v_m
                 + r * v_hat)
 
-    return residual, v_tau, v_m, v_mm
+    return residual, v_tau, v_m, v_mm, v_hat
 
 
-def compute_smoothness_loss(model, m, tau, normalizer):
+def compute_smoothness_loss(model, m, tau, normalizer, weight_m=0.01, weight_tau=1.0):
     """
     Tikhonov regularization on the volatility surface: ||Laplacian(sigma)||^2.
     
     Penalizing the second derivatives (roughness/curvature) allows the network 
     to learn natural slopes and smiles, while preventing wild oscillations.
+    
+    Parameters
+    ----------
+    weight_m   : float — Weight for moneyness curvature. Lower values allow sharper smiles.
+    weight_tau : float — Weight for time curvature. Higher values enforce smoother term structure.
     """
     m_norm, tau_norm = normalizer.normalize(m, tau)
     _, sigma_hat = model(m_norm, tau_norm)
@@ -180,11 +185,6 @@ def compute_smoothness_loss(model, m, tau, normalizer):
     sigma_tautau = torch.autograd.grad(sigma_tau, tau,
                                        grad_outputs=torch.ones_like(sigma_tau),
                                        create_graph=True)[0]
-
-    # The natural curvature of the smile (m-direction) is much higher than the term structure (tau-direction).
-    # We apply a smaller weight to sigma_mm to allow the smile to form naturally without being over-penalized.
-    weight_m = 0.01
-    weight_tau = 1.0
 
     return torch.mean(weight_m * sigma_mm**2 + weight_tau * sigma_tautau**2)
 

@@ -68,6 +68,9 @@ TRAIN = {
     'lambda_smooth': 0.001,
     'lambda_ic': 3.0,
     'lambda_arb': 5.0,
+    # Anisotropic smoothness weights (moneyness smile vs term structure)
+    'smooth_weight_m': 0.01,    # Low: allow sharp smile curvature
+    'smooth_weight_tau': 1.0,   # High: enforce smooth term structure
     # Loss Balancer
     'use_loss_balancer': False,
     # Target Gradient Ratios (Loss Balancer)
@@ -180,22 +183,28 @@ def compute_loss(model, normalizer, data_tensors, bs_params, fdm_params,
     else:
         m_pde, tau_pde = sample_pde_points(train_cfg['n_pde'], m_min, m_max,
                                             tau_max, device)
-    residual, v_tau, v_m, v_mm = compute_pde_residual_phase2(model, m_pde, tau_pde,
+    residual, v_tau, v_m, v_mm, v_hat_pde = compute_pde_residual_phase2(model, m_pde, tau_pde,
                                             normalizer, r, q)
     loss_pde = torch.mean(residual ** 2)
 
     # --- Arbitrage-Free Constraints ---
-    # Calendar Spread: v_tau >= 0
-    # Using C^2 continuous ReLU^3 to ensure infinite differentiability for L-BFGS
-    # while strictly pinning the penalty at exactly zero for valid non-arbitrage points.
-    calendar_penalty = torch.mean(torch.relu(-v_tau)**3)
-    # Butterfly Spread: v_mm - v_m >= 0 (convexity in log-moneyness)
+    # 1. True Dupire Calendar Constraint for European options with dividends:
+    #    v_tau + r*v - (r-q)*v_m >= 0
+    #    This correctly allows deep ITM options to lose value due to dividend decay,
+    #    unlike the naive v_tau >= 0 which is only valid for American options.
+    calendar_violation = -(v_tau + r * v_hat_pde - (r - q) * v_m)
+    calendar_penalty = torch.mean(torch.relu(calendar_violation)**3)
+    # 2. Butterfly Spread: v_mm - v_m >= 0 (strict convexity in log-moneyness)
     butterfly_penalty = torch.mean(torch.relu(-(v_mm - v_m))**3)
     loss_arb = calendar_penalty + butterfly_penalty
 
     # --- Smoothness loss: Tikhonov on sigma ---
     # Reuse PDE points for efficiency
-    loss_smooth = compute_smoothness_loss(model, m_pde, tau_pde, normalizer)
+    loss_smooth = compute_smoothness_loss(
+        model, m_pde, tau_pde, normalizer,
+        weight_m=train_cfg.get('smooth_weight_m', 0.01),
+        weight_tau=train_cfg.get('smooth_weight_tau', 1.0)
+    )
 
     # --- IC loss: terminal condition at tau = 0 ---
     if fixed_ic is not None:

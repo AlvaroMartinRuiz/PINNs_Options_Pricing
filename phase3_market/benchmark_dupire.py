@@ -276,6 +276,61 @@ def plot_three_way(k_eval, tau_eval, sigma_raw, sigma_svi, sigma_pinn,
     plt.close(fig)
 
 
+def plot_three_way_3d(k_eval, tau_eval, sigma_raw, sigma_svi, sigma_pinn, results_dir='results/phase3'):
+    """3-panel 3D surface comparison."""
+    os.makedirs(results_dir, exist_ok=True)
+    moneyness = np.exp(k_eval)
+    
+    # Create meshgrid for 3D plotting
+    TT, MM = np.meshgrid(tau_eval, moneyness, indexing='ij')
+
+    vmin, vmax = 0.05, 0.55
+
+    fig = plt.figure(figsize=(24, 8))
+    titles = [
+        '(A)  Raw FDM Dupire',
+        '(B)  Smoothed Dupire (SVI)',
+        '(C)  PINN Local Volatility'
+    ]
+
+    for idx, (title, surf) in enumerate(zip(titles, [sigma_raw, sigma_svi, sigma_pinn])):
+        ax = fig.add_subplot(1, 3, idx + 1, projection='3d')
+        
+        # For panels A/B, use a special colormap that shows NaN as gray
+        cmap = plt.cm.viridis.copy()
+        cmap.set_bad(color='#2a2a2a')
+        
+        # We plot the surface. Note: surf is (Nk, Nt). We need it to match TT, MM which are (Nt, Nk) if indexing='ij'.
+        # Actually in plot_three_way we did ax.pcolormesh(tau_eval, moneyness, surf), where surf is (Nk, Nt).
+        # Let's create proper meshgrid:
+        TT_grid, MM_grid = np.meshgrid(tau_eval, moneyness)
+        # surf is (Nk, Nt), so surf matches TT_grid and MM_grid which are (Nk, Nt).
+        
+        # To avoid ValueError with NaN in 3D surface, we can clip or mask, but plot_surface handles NaN by not rendering the polygon.
+        surf_plot = np.clip(surf, vmin, vmax) # Clip for better visual range in Z axis
+        
+        im = ax.plot_surface(TT_grid, MM_grid, surf_plot, cmap=cmap, vmin=vmin, vmax=vmax,
+                             linewidth=0, antialiased=False, alpha=0.9)
+        
+        ax.set_xlabel('τ (years to expiry)', fontsize=11, labelpad=10)
+        ax.set_ylabel('Moneyness K/S', fontsize=11, labelpad=10)
+        ax.set_zlabel('Local Vol σ', fontsize=11, labelpad=10)
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+        ax.set_zlim(vmin, vmax)
+        ax.view_init(elev=25, azim=-125) # Adjust viewing angle
+
+    # Shared colorbar
+    cbar_ax = fig.add_axes([0.93, 0.2, 0.015, 0.6])
+    cb = fig.colorbar(im, cax=cbar_ax)
+    cb.set_label('Local Vol σ', fontsize=12)
+
+    fig.subplots_adjust(left=0.02, right=0.91, wspace=0.1)
+    out = os.path.join(results_dir, 'benchmark_comparison_3d.png')
+    fig.savefig(out, dpi=200, bbox_inches='tight')
+    print(f"  [OK] Saved: {out}")
+    plt.close(fig)
+
+
 def plot_cross_sections(k_eval, tau_eval, sigma_raw, sigma_svi, sigma_pinn,
                         market_data, results_dir='results/phase3'):
     """Cross-section plots at 4 representative maturities."""
@@ -403,6 +458,7 @@ def main():
                    market_data)
     plot_cross_sections(k_eval, tau_eval, sigma_raw, sigma_svi, sigma_pinn,
                         market_data)
+    plot_three_way_3d(k_eval, tau_eval, sigma_raw, sigma_svi, sigma_pinn)
     print("\n  Benchmark complete.\n")
 
 

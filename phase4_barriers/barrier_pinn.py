@@ -121,7 +121,7 @@ class BarrierPriceNet(nn.Module):
 # ── Training Engine ─────────────────────────────────────────────────────────
 
 def train_barrier_pinn(barrier_m, barrier_type, sigma_func_frozen,
-                       r, q, m_domain, tau_max,
+                       r, q, m_spot, m_domain, tau_max,
                        normalizer, device,
                        n_epochs=5000, lr=1e-3,
                        n_pde=2000, n_ic=500,
@@ -163,26 +163,24 @@ def train_barrier_pinn(barrier_m, barrier_type, sigma_func_frozen,
         v = model(m_n, tau_n, m_pde)
 
         # Get frozen sigma at collocation points
-        with torch.no_grad():
-            sig_np = sigma_func_frozen(m_pde.detach().cpu().numpy(),
-                                        tau_pde.detach().cpu().numpy().mean())
-        # Approximate: evaluate sigma at mean tau for this batch
-        # More accurately, we should evaluate per-point:
-        sig_vals = []
+        # COORDINATE FIX: The PINN vol surface expects m_pinn = ln(S0/K_dupire).
+        # The FDM/PINN spatial grid uses m = ln(S/K). By Dupire, K_dupire = S,
+        # so m_pinn = ln(S0/S) = ln(S0/K) - ln(S/K) = m_spot - m_grid.
         tau_vals_np = tau_pde.detach().cpu().numpy()
         m_vals_np = m_pde.detach().cpu().numpy()
         unique_taus = np.unique(np.round(tau_vals_np, 4))
-        # Fast: evaluate at the per-point tau
         sig_all = np.zeros(n_pde)
         for tau_val in unique_taus:
             mask = np.abs(tau_vals_np - tau_val) < 5e-4
             if mask.any():
-                sig_all[mask] = sigma_func_frozen(m_vals_np[mask], float(tau_val))
+                m_query = m_spot - m_vals_np[mask]
+                sig_all[mask] = sigma_func_frozen(m_query, float(tau_val))
 
         # For points not covered (unlikely), use mean tau
         remaining = sig_all == 0
         if remaining.any():
-            sig_all[remaining] = sigma_func_frozen(m_vals_np[remaining],
+            m_query_rem = m_spot - m_vals_np[remaining]
+            sig_all[remaining] = sigma_func_frozen(m_query_rem,
                                                     float(tau_vals_np.mean()))
 
         sigma = torch.tensor(sig_all, dtype=torch.float32, device=device).unsqueeze(-1)
@@ -316,11 +314,13 @@ if __name__ == '__main__':
     normalizer = LogMoneynessNormalizer(m_scale=0.5, tau_max=T)
 
     # Train
+    m_spot = np.log(S / K)
     model, history = train_barrier_pinn(
         barrier_m=barrier_m,
         barrier_type=barrier_type,
         sigma_func_frozen=sf,
         r=r, q=q,
+        m_spot=m_spot,
         m_domain=(barrier_m, 1.0),
         tau_max=T,
         normalizer=normalizer,

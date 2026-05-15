@@ -252,10 +252,11 @@ def plot_greeks_comparison(sigma_func, r, q):
     normalizer = LogMoneynessNormalizer(m_scale=0.5, tau_max=T)
 
     # Train PINN with calibrated LV
+    m_spot = np.log(S0 / K_ATM)
     model, _ = train_barrier_pinn(
         barrier_m=barrier_m, barrier_type='down-out',
         sigma_func_frozen=sigma_func,
-        r=r, q=q,
+        r=r, q=q, m_spot=m_spot,
         m_domain=(barrier_m, 0.3),
         tau_max=T, normalizer=normalizer, device=device,
         n_epochs=5000, lr=1e-3, n_pde=2000, n_ic=500,

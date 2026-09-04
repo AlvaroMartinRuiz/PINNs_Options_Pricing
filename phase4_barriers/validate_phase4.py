@@ -67,25 +67,30 @@ def load_phase3():
 #  PART 2: THREE-WAY PRICE COMPARISON TABLE
 # ═══════════════════════════════════════════════════════════════════════════
 
-def run_price_comparison(sigma_func, r, q, sigma_const=0.20):
+def run_price_comparison(sigma_func, r, q, sigma_const=0.20, train_pinn=True):
     """
-    Run FDM, MC, and BS closed-form for all barrier configurations.
+    Run FDM, MC, PINN, and BS closed-form for all barrier configurations.
+
+    With train_pinn=True a barrier-specific PINN is trained per configuration
+    (frozen Phase 3 surface, same recipe as barrier_pinn.py: 5,000 Adam epochs,
+    2,000 PDE points, 500 IC points) so its price can be tabulated next to the
+    FDM/MC benchmarks. Training dominates the runtime of this part (~45-85 min
+    per barrier level on CPU); set train_pinn=False to skip it.
     """
     print("\n" + "=" * 75)
-    print("  THREE-WAY BARRIER PRICE COMPARISON")
+    print("  FOUR-WAY BARRIER PRICE COMPARISON")
     print("=" * 75)
 
     results = []
-    sf_const = sigma_constant(sigma_const)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    m_spot = np.log(S0 / K_ATM)
+    normalizer = LogMoneynessNormalizer(m_scale=0.5, tau_max=T)
 
     for barrier_type, barriers_pct, bs_fn, label in [
         ('down-out', DOWN_BARRIERS, down_and_out_call, 'Down-Out Call'),
         ('up-out',   UP_BARRIERS,   up_and_out_call,   'Up-Out Call'),
     ]:
         print(f"\n  --- {label} (S0={S0:.0f}, K={K_ATM:.0f}, T={T}) ---")
-        print(f"  {'B':>7s} | {'BS(const)':>10s} | {'FDM(LV)':>10s} | "
-              f"{'MC(LV)':>14s} | {'Diff%':>7s}")
-        print("  " + "-" * 65)
 
         for B_pct in barriers_pct:
             B = B_pct * S0
@@ -108,17 +113,56 @@ def run_price_comparison(sigma_func, r, q, sigma_const=0.20):
             mc_price = mc_result['price']
             mc_se = mc_result['se']
 
+            # Barrier PINN with the same frozen LV surface
+            pinn_price = float('nan')
+            if train_pinn:
+                barrier_m = np.log(B / K_ATM)
+                m_domain = ((barrier_m, 0.3) if barrier_type == 'down-out'
+                            else (-0.3, barrier_m))
+                model, _ = train_barrier_pinn(
+                    barrier_m=barrier_m, barrier_type=barrier_type,
+                    sigma_func_frozen=sigma_func, r=r, q=q, m_spot=m_spot,
+                    m_domain=m_domain, tau_max=T, normalizer=normalizer,
+                    device=device, n_epochs=5000, lr=1e-3,
+                    n_pde=2000, n_ic=500,
+                )
+                pinn_price = price_barrier_pinn(model, normalizer,
+                                                S0, K_ATM, B, T, barrier_type)
+
             # Difference: LV vs constant vol
             diff_pct = (fdm_price - bs_price) / max(abs(bs_price), 1e-10) * 100
+            # PINN agreement with the two numerical benchmarks
+            pinn_vs_fdm = (pinn_price - fdm_price) / max(abs(fdm_price), 1e-10) * 100
+            pinn_vs_mc = (pinn_price - mc_price) / max(abs(mc_price), 1e-10) * 100
 
-            print(f"  {B:7.1f} | {bs_price:10.4f} | {fdm_price:10.4f} | "
-                  f"{mc_price:8.4f}+/-{mc_se:.4f} | {diff_pct:+7.1f}%")
+            print(f"\n  B={B:.1f} | BS(const)={bs_price:.4f} | "
+                  f"FDM(LV)={fdm_price:.4f} | MC(LV)={mc_price:.4f}+/-{mc_se:.4f} | "
+                  f"PINN(LV)={pinn_price:.4f}")
+            print(f"    LV vs BS: {diff_pct:+.1f}%   "
+                  f"PINN vs FDM: {pinn_vs_fdm:+.2f}%   "
+                  f"PINN vs MC: {pinn_vs_mc:+.2f}%")
 
             results.append({
                 'type': barrier_type, 'B': B, 'B_pct': B_pct,
                 'bs': bs_price, 'fdm': fdm_price,
                 'mc': mc_price, 'mc_se': mc_se,
+                'pinn': pinn_price,
+                'pinn_vs_fdm': pinn_vs_fdm, 'pinn_vs_mc': pinn_vs_mc,
             })
+
+    # Summary table (thesis Table phase4-prices)
+    print("\n" + "=" * 75)
+    print("  SUMMARY")
+    print("=" * 75)
+    header = (f"  {'Type':<9s} {'B':>7s} | {'BS-const':>9s} | {'FDM-LV':>9s} | "
+              f"{'MC-LV':>16s} | {'PINN-LV':>9s} | {'vs FDM':>8s} | {'vs MC':>8s}")
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for row in results:
+        print(f"  {row['type']:<9s} {row['B']:7.1f} | {row['bs']:9.4f} | "
+              f"{row['fdm']:9.4f} | {row['mc']:9.4f}+/-{row['mc_se']:.4f} | "
+              f"{row['pinn']:9.4f} | {row['pinn_vs_fdm']:+7.2f}% | "
+              f"{row['pinn_vs_mc']:+7.2f}%")
 
     return results
 
@@ -159,7 +203,7 @@ def plot_barrier_sensitivity(sigma_func, r, q):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
     ax1.plot(B_pcts_down * 100, prices_down, 'b-o', markersize=4, linewidth=2)
-    ax1.axhline(vanilla_fdm, color='gray', linestyle='--', alpha=0.7,
+    ax1.axhline(vanilla_fdm, color='black', linestyle='--', linewidth=1.5,
                 label=f'Vanilla Call ({vanilla_fdm:.2f})')
     ax1.set_xlabel('Barrier Level (% of Spot)', fontsize=12)
     ax1.set_ylabel('Option Price ($)', fontsize=12)
@@ -168,9 +212,12 @@ def plot_barrier_sensitivity(sigma_func, r, q):
     ax1.grid(True, alpha=0.3)
 
     ax2.plot(B_pcts_up * 100, prices_up, 'r-o', markersize=4, linewidth=2)
+    ax2.axhline(vanilla_fdm, color='black', linestyle='--', linewidth=1.5,
+                label=f'Vanilla Call ({vanilla_fdm:.2f})')
     ax2.set_xlabel('Barrier Level (% of Spot)', fontsize=12)
     ax2.set_ylabel('Option Price ($)', fontsize=12)
     ax2.set_title('Up-and-Out Call: Barrier Sensitivity', fontsize=13)
+    ax2.legend(fontsize=10)
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()

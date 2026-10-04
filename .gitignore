@@ -17,3 +17,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Working notes. The exploration scripts in scratch/ are tracked; the notes are not.
+scratch/*.md
